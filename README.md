@@ -2,9 +2,9 @@
 
 Measured, reproducible performance notes for LLM inference on Jetson Orin (Nano 8GB, Super, NX, AGX). Every number here came from a real measurement on a 7.3 GiB Orin Nano; nothing is copied from a datasheet or estimated from a formula that wasn't then tested.
 
-The point of this repo is to stop you from tuning the wrong knob. On an 8 GB Orin, most of what people adjust — threads, batch size, flash attention flags, KV quantization — is **noise**, and the things that actually move the needle are structural: quantization layout, vocabulary size, memory bandwidth, and whether your workload is compute- or bandwidth-bound at all.
+The point of this repo is to stop you from tuning the wrong knob. On an 8 GB Orin, most of what people adjust — thread counts, batch size, GPU clocks, speculative-decoding depth — is **noise**, and the things that actually move the needle are structural: quantization layout, vocabulary size, memory bandwidth, whether the workload is compute- or bandwidth-bound at all, and whether the runtime can quantize its KV cache.
 
-## Six conclusions, each with evidence
+## Seven conclusions, each with evidence
 
 ### 1. Find out which bottleneck you have before touching anything
 
@@ -103,6 +103,28 @@ Now a runaway allocation kills the benchmark instead of your session. **Never co
 
 → [`references/memory-budget.md`](references/memory-budget.md)
 
+### 7. KV quantization decides your context ceiling — and it's a runtime property, not a model property
+
+Same board, same model, same weights, two engines, two ceilings:
+
+| Engine | Model | KV bytes/token | KV quant | Largest context actually run |
+|---|---|---|---|---|
+| llama.cpp | Bonsai 9B (hybrid) | 32 KB | ✅ `-ctk q8_0` | **65 536** @ 36.10 t/s |
+| MLC-LLM | Qwen3-1.7B | 112 KB | ❌ none | **8 192** @ 14.96 t/s (32K OOM) |
+
+A 9B reaches 64K while a 1.7B cannot reach 32K. Two independent multipliers: hybrid attention (÷4 on KV bytes) and whether the runtime can quantize K/V at all.
+
+**Weight quantization does not shrink KV.** Qwen3-1.7B drops from ~3.4 GB fp16 to 961 MB with `q4f16_1` — a working 3.5x weight saving — while KV stays pinned at 112 KB/token. Conflating the two is the single most common reason people conclude "4-bit models must have cheap long context."
+
+Practical order of operations:
+
+1. Compute `context × bytes/token` (dividing by `full_attention_interval`). If it exceeds ~60% of usable memory, it's structural.
+2. Prefer an engine with KV quantization: `-ctk q8_0 -ctv q8_0 -fa 1` in llama.cpp-family. `-fa 1` is **required** for quantized KV to be efficient.
+3. If locked to an engine without it, cap context instead of OOMing — compile-time `sliding_window_size` fixes KV at a constant size and only costs distant memory.
+4. Never change weight quant level hoping it helps context. It moves KV by zero.
+
+→ [`references/kv-quantization.md`](references/kv-quantization.md)
+
 ## Reference index
 
 | File | Covers |
@@ -111,6 +133,7 @@ Now a runaway allocation kills the benchmark instead of your session. **Never co
 | [`references/memory-budget.md`](references/memory-budget.md) | Real vs nominal memory, `cudaMalloc` ceiling, CMA vs CUDA, cgroup caging, OOM precursors, desktop stack cost |
 | [`references/emc-bandwidth.md`](references/emc-bandwidth.md) | Unlocking EMC 2133→3199 MHz, why `apt upgrade` can't do it, three independent readouts, bandwidth measurement paths, timing bugs that corrupt results |
 | [`references/context-scaling.md`](references/context-scaling.md) | Measured context sweep, hybrid vs dense attention KV math, prefill vs generation cost model, what actually breaks at 64K |
+| [`references/kv-quantization.md`](references/kv-quantization.md) | KV bytes/token math, which engines can quantize KV, llama.cpp flags, MLC absence evidence, `sliding_window_size` fallback, NvMap/CMA misdiagnosis |
 
 ## Tested platform
 

@@ -51,6 +51,8 @@ This is a **hybrid-attention** architecture. Only one layer in four maintains a 
 bytes/token ≈ 128 KB / 4 = 32 KB/token
 ```
 
+> Whether you can shrink this further depends on the **runtime**, not the model: llama.cpp supports `-ctk q8_0` (halves it again), MLC-LLM has no KV quantization at all. See [`kv-quantization.md`](kv-quantization.md) — that single property is why a 9B model reaches 64K here while a 1.7B model cannot reach 32K.
+
 | Context | Naive estimate | Actual |
 |---|---|---|
 | 8 192 | 1.0 GiB | ~260 MB |

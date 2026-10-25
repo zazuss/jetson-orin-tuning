@@ -13,6 +13,7 @@ Measured performance notes for LLM inference on Jetson Orin. The organizing prin
 - "Something must be misconfigured" — prove the bottleneck class before touching anything
 - Model won't load → memory budget, not CMA
 - Long context too slow / not fitting → hybrid attention KV math
+- "My 4-bit model can't hold long context" → KV isn't affected by weight quantization; check whether the engine can quantize KV at all
 - Bandwidth numbers look inconsistent → measurement path and timing bugs
 - Choosing a quant format → simple block quant beats K-quant on weak GPUs
 
@@ -53,6 +54,19 @@ MB × tok/s ≈ 40 000        (simple block quant, this hardware class)
 - KV bytes = formula **÷ full-attention interval**, not `block_count`. `full_attention_interval = 4` → 32 KB/token, not 128 KB.
 - Prefill is what costs: 64K ÷ 300 t/s ≈ 218 s to first token.
 
+### Step 5 — can the engine quantize KV?
+
+This bounds the context ceiling before any tuning. Measured on one board:
+
+| Engine | KV/token | KV quant | Max context actually run |
+|---|---|---|---|
+| llama.cpp | 32 KB (hybrid model) | ✅ `-ctk q8_0 -ctv q8_0 -fa 1` | 65 536 @ 36.1 t/s |
+| MLC-LLM | 112 KB | ❌ none | 8 192 @ 15.0 t/s; 32K OOMs |
+
+- **Weight quant ≠ KV quant.** A 3.5x weight saving (`q4f16_1`: 3.4 GB → 961 MB) leaves KV untouched at 112 KB/token.
+- No KV quant and context doesn't fit → cap it, don't fight it: compile-time `sliding_window_size` fixes KV (costs distant memory, not stability).
+- With quantized KV, `-fa 1` is mandatory for speed.
+
 ## Reference files
 
 | File | Read it when |
@@ -61,6 +75,7 @@ MB × tok/s ≈ 40 000        (simple block quant, this hardware class)
 | [`references/memory-budget.md`](references/memory-budget.md) | OOM, load failures, `cudaMalloc` ceiling, CMA confusion, cgroup caging, prefill peaks |
 | [`references/emc-bandwidth.md`](references/emc-bandwidth.md) | EMC stuck at 2133; verifying a bandwidth unlock; measuring bandwidth correctly; event-timing bugs |
 | [`references/context-scaling.md`](references/context-scaling.md) | Context length vs speed and memory; hybrid vs dense KV math; 128K feasibility |
+| [`references/kv-quantization.md`](references/kv-quantization.md) | Can this engine quantize KV? KV bytes/token math; llama.cpp flags; MLC's absence; `sliding_window_size` fallback; NvMap/CMA misdiagnosis |
 
 ## Rules that save the most time
 
