@@ -54,7 +54,7 @@ MB × tok/s ≈ 40 000        (simple block quant, this hardware class)
 ### Step 4 — long context
 
 - Generation is nearly flat with context on hybrid-attention models: **36.10 t/s at 64K → 36.08 t/s at 256K** (−0.05%, not the −18 t/s an earlier bandwidth extrapolation predicted).
-- KV bytes = formula **÷ full-attention interval**, not `block_count`. `full_attention_interval = 4` → 32 KB/token, not 128 KB.
+- KV bytes = formula **÷ full-attention interval**, not `block_count`. `full_attention_interval = 4` → ~38 KB/token measured (32 KB by layer count), not 128 KB.
 - Prefill is what costs: 64K ÷ 300 t/s ≈ 218 s to first token; 128K ÷ 214 t/s ≈ **612 s**. Prefill peak — not steady-state size — is what OOMs.
 - **Set `-np 1` before touching KV quantization.** `llama-server` defaults to 4 slots, each reserving the full `n_ctx`: at 256K that is 16.53 t/s and an OOM-kill on request #2, versus 36.08 t/s and stable with `-np 1`.
 - Concurrency cannot add throughput on a bandwidth-bound model — single-stream decode already uses ~67 of ~98 GB/s. Parallel sub-agents against a local model each run slower than serialized ones.

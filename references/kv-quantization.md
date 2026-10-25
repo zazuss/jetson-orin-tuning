@@ -45,7 +45,7 @@ On a board with **7 485 MB** usable, fp16 KV puts 64K out of reach by constructi
 
 The 9B model reaches 64K while the 1.7B model cannot reach 32K. That is not a model-size paradox — it's two independent multipliers:
 
-1. **Architecture**: hybrid attention makes the 9B store 32 KB/token instead of 128 KB (4x saving).
+1. **Architecture**: hybrid attention makes the 9B store ~38 KB/token (fp16, measured) instead of 128 KB — a 3.4x saving from the layer count alone.
 2. **Runtime**: llama.cpp can quantize K/V, MLC cannot.
 
 Note that **weight quantization does not shrink KV**. Qwen3-1.7B's weights go from ~3.4 GB fp16 to 961 MB with `q4f16_1` — an active, working 3.5x saving on weights — while KV stays at a fixed 112 KB/token. People conflate the two constantly, then wonder why their 4-bit model still can't hold long context.

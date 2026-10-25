@@ -1,6 +1,6 @@
 # Context scaling: measured, and why the naive KV formula lies
 
-> **中文速览** —— 这份文档是上下文长度的实测扫描（128 到 262144），解释为什么混合注意力模型上长上下文几乎免费、解码速度为什么不随上下文下降、`-np` 单路设置为什么比 KV 量化更关键，以及 KV 成本该怎么算（必须按 full-attention 的层数算，不能按 block_count）。还记录了真正会坏在哪里：不是 KV，是 prefill 的瞬时计算缓冲。
+> **中文速览** —— 这份文档是上下文长度的实测扫描（128 到 262144），解释为什么混合注意力模型上长上下文几乎免费、解码速度为什么不随上下文下降、`-np` 单路设置为什么比 KV 量化更关键，以及 KV 成本该怎么算（必须按 full-attention 的层数算，不能按 block_count）。KV 尺寸按实测斜率算：`q4_0` 是每 token 10.7 KB、fp16 约 38 KB，且 `q4_0` 只压 3.56 倍不是 4 倍（4 bit + 每 32 值一个 fp16 scale = 4.5 bit/值），所以教科书那种「q4 = 四分之一」的估法在 64K 上会低约 35%。还记录了真正会坏在哪里：不是 KV，是 prefill 的瞬时计算缓冲。
 
 
 ## 1. The measurement
@@ -52,20 +52,25 @@ qwen35.attention.full_attention_interval = 4
 This is a **hybrid-attention** architecture. Only one layer in four maintains a full KV cache; the rest use a recurrent/linear-attention state whose size does not grow with context. Effective KV cost:
 
 ```
-bytes/token ≈ 128 KB / 4 = 32 KB/token
+bytes/token ≈ 128 KB / 4 = 32 KB/token   # layer-count arithmetic
+bytes/token ≈ 38 KB/token                # what RSS actually showed
 ```
+
+The layer-count figure is a lower bound: measured fp16 KV is ~38 KB/token, about 19% above it (allocation granularity and per-layer padding). Size from the measured number.
 
 > Whether you can shrink this further depends on the **runtime**, not the model: llama.cpp supports `-ctk q8_0` / `q4_0` (halves or quarters it again), MLC-LLM has no KV quantization at all. See [`kv-quantization.md`](kv-quantization.md) — that property, plus the slot count, is why a 9B model reaches 256K here while a 1.7B model cannot reach 32K.
 
-| Context | Naive estimate | Actual (fp16 KV) | Actual (`q4_0` KV) |
+| Context | Naive estimate | fp16 (derived) | **`q4_0` (measured slope)** |
 |---|---|---|---|
-| 8 192 | 1.0 GiB | ~260 MB | ~65 MB |
-| 32 768 | 4.0 GiB | ~1.0 GiB | ~260 MB |
-| 65 536 | 8.0 GiB | ~2.0 GiB | ~520 MB |
-| 131 072 | 16.0 GiB | ~4.0 GiB | **~1.0 GiB** |
-| 262 144 | 32.0 GiB | ~8.0 GiB | **~2.9 GiB** (measured) |
+| 8 192 | 1.0 GiB | ~300 MB | **~88 MB** |
+| 32 768 | 4.0 GiB | ~1.2 GiB | **~350 MB** |
+| 65 536 | 8.0 GiB | ~2.4 GiB | **~710 MB** |
+| 131 072 | 16.0 GiB | ~4.9 GiB (does not fit) | **~1.37 GiB** |
+| 262 144 | 32.0 GiB | ~9.7 GiB (impossible) | **~2.68 GiB** |
 
-One thing the table hides: `q4_0` does not deliver a clean 4x at large contexts. Measured at 256K the KV allocation was **~2.9 GB**, i.e. ~11.6 KB/token rather than the 8 KB/token the 4x rule predicts — about 3.6x over fp16, not 4x. Budget for the higher figure.
+The `q4_0` column is no longer arithmetic — it is the measured slope. Holding weights constant and varying only `-c`, process RSS came out at 2 676 MB (8K), 3 300 MB (64K), 3 999 MB (128K), 5 393 MB (256K). Successive deltas: 624 / 699 / 1 394 MB, i.e. **10.6–10.9 KB per token, dead linear**. The fp16 column is that slope × 3.56.
+
+**`q4_0` is 3.56x, not 4x.** The format stores 4 bits plus one fp16 scale per 32 values = 4.5 bits/value, so 16 ÷ 4.5 = 3.56. An earlier version of this table applied the textbook 4x and came out ~35% low at 64K (`~520 MB` when the real figure is ~710 MB). If you are budgeting, use 10.7 KB/token for `q4_0` and 38 KB/token for fp16.
 
 **Rule: compute KV cost from the count of full-attention layers, never from `block_count`.** On dense-attention models the two are equal, which is why the naive formula usually works — and why it produces a confident 4× overestimate on hybrid architectures like Qwen3.5, Jamba, MiniMax, and Phi-3.5-MoE derivatives.
 
@@ -90,7 +95,7 @@ PY
 | **Prefill** | prompt length × n_layers | Compute (matrix-matrix) |
 | **Generation** | 1 token, all weights | Memory bandwidth |
 
-At 64K the prefill rate drops 16.7% (360 → 300 t/s) because attention over 64K tokens becomes a growing share of a matmul-dominated workload. Generation is unaffected because each step still reads the same number of weight bytes — the KV cache it additionally reads (32 KB/token × 65 536 = 2 GB) is spread over 36 tokens/s, i.e. negligible against the weight stream.
+At 64K the prefill rate drops 16.7% (360 → 300 t/s) because attention over 64K tokens becomes a growing share of a matmul-dominated workload. Generation is unaffected because each step still reads the same number of weight bytes — the KV cache it additionally reads (~38 KB/token × 65 536 = 2.4 GiB) is spread over 36 tokens/s, i.e. ~1.4 GB/s, negligible against the 67 GB/s weight stream.
 
 **Practical consequence:** time-to-first-token on a long prompt is the number users actually feel. 64K ÷ 300 t/s ≈ 218 s before the first token. No generation-side optimization helps that.
 
