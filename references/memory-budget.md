@@ -25,23 +25,29 @@ kernel + initrd      ~370 MB
 
 **Model sizing must use 7.31 GiB, not 8 GB.** A 6 GB model leaves 1.3 GiB for KV cache, CUDA context (~250 MB) and the runtime — which is not enough for meaningful context on most architectures.
 
-## 2. `cudaMalloc` ceiling: 4 576 MB single, 5 376 MB cumulative
+## 2. `cudaMalloc` ceiling: not fixed — it tracks available memory
 
-Measured 2026-10-25 with a purpose-built probe (`cudaMalloc` + `cudaMemcpy` + free, freeing between attempts), run under `systemd-run --user --scope -p MemoryMax=infinity` so it did not inherit any cgroup limit:
+There is no constant "CUDA allocation limit" on this board. The probe (`cudaMalloc` + `cudaMemcpy` + free, bisected, run under `systemd-run --user --scope -p MemoryMax=infinity` so it inherits no cgroup limit) returns different numbers depending on what else is running:
 
-| Test | Result |
-|---|---|
-| Largest single contiguous `cudaMalloc` | **4 576 MB** |
-| Cumulative multi-block (768 MB chunks) | **5 376 MB** — 7 chunks OK, 8th fails |
-| `cudaMemcpy` device↔host throughput | **98 GB/s** |
+| Environment | `MemAvailable` | Single contiguous | Cumulative (768 MB chunks) |
+|---|---|---|---|
+| Bonsai + searxng stopped | 4 739 MB | **4 608 MB** | **5 376 MB** (7 chunks) |
+| Bonsai stopped only | 4 593 MB | **4 384 MB** | **4 608 MB** (6 chunks) |
+| Inside an agent's cgroup (3.65 GiB cap) | — | 4 320 MB | 5 250 MB |
 
-Both allocation figures move with currently free memory: the same probe returned 4 320 MB on a first run taken while the desktop stack was warm, then 4 576 MB after it settled. Treat the ceiling as a **range (~4.4–4.6 GB single, ~5.2–5.4 GB cumulative), not a hardware constant.** Earlier notes in this repo quoted "4.85 GB" as a fixed number; that was a single observation reported as a limit.
+`cudaMemcpy` device↔host throughput is a stable **98 GB/s**.
+
+Two rules follow:
+
+- **Single contiguous ≈ `MemAvailable` − 200 MB**, i.e. ~4.3–4.5 GB in practice. The deficit is driver/fragmentation overhead.
+- **Cumulative is quantised by the chunk size.** With 768 MB chunks the result jumps a whole chunk at a time (4 608 → 5 376), so the number you get is a step function of ambient memory, not a smooth curve. Peak observed: **5 376 MB**.
 
 Three corrections that matter for sizing:
 
-- **Chunking does not unlock more.** The old advice "allocate in chunks if you need more" is wrong in the useful sense: chunking raised the ceiling from 4 576 MB to 5 376 MB (about 17%), not to the 7.31 GiB of managed memory. The remaining ~1.9 GiB is not allocatable by CUDA no matter how you slice the request.
-- **llama.cpp allocates per-tensor, not in one block.** So the figure that decides whether a GGUF loads is the **5 376 MB** cumulative number, not the 4 576 MB single-allocation number. A 27B at 5 671 MB of weights exceeds it by **295 MB** before any KV cache — which is the real reason it does not fit, not a 1.3 GB gap.
-- **Run the probe outside your agent's cgroup.** Executed inside a Hermes background wrapper the same probe reported 4 320 / 5 250 MB and would have been reported as the answer. The wrapper's `memory.max` was 3.65 GiB.
+- **Chunking does not unlock "all of it".** It raised the ceiling from 4 608 to 5 376 MB (~17%) in the best case, not to the 7.31 GiB of managed memory. The remaining ~1.9 GiB is unavailable to CUDA however you slice the request.
+- **llama.cpp allocates per-tensor, not in one block**, so the cumulative figure is the one that decides whether a GGUF loads.
+- **27B does not fit, but by less than folklore says.** `PTQ1_0` weights are 5 671 MB against a best-case 5 376 MB cumulative ceiling — short by **295 MB** in the best case and ~1 063 MB on a day when you only reach 4 608 MB. Either way it is short before any KV cache, so the conclusion is unchanged; the size of the gap is not a constant and should not be quoted as one.
+- **Run the probe outside your agent's cgroup.** Inside a Hermes background wrapper it reported 4 320 / 5 250 MB and would have been taken as the answer. That wrapper's `memory.max` was 3.65 GiB.
 
 ## 3. CMA is never your problem
 
