@@ -1,0 +1,25 @@
+# build artifacts
+build/
+*.o
+*.a
+*.so
+*.so.*
+*.bin
+
+# models
+*.gguf
+*.safetensors
+*.ggml
+models/
+
+# archives
+*.tar.gz
+*.zip
+
+# local env
+.env
+env.sh
+*.log
+nohup.out
+.vscode/
+.idea/

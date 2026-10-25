@@ -1,0 +1,106 @@
+# Context scaling: measured, and why the naive KV formula lies
+
+## 1. The measurement
+
+Ternary-Bonsai-2 9B (`PTQ1_0`, 1.85 GiB, 8.95B params, 1.75 bpw) on a 7.3 GiB Orin Nano, `llama-bench`:
+
+```bash
+systemd-run --user --scope -p MemoryHigh=6.5G -p MemoryMax=7G \
+  ./llama-bench -m Ternary-Bonsai-2-9B-PTQ1_0.gguf \
+                -p <CTX> -n 64 -ngl 99 -t 6 -r 1
+```
+
+| Context | Prefill (t/s) | Generation (t/s) | Process RSS |
+|---|---|---|---|
+| 128 | 360.75 ± 12.78 | 36.57 ± 0.26 | — |
+| 2 048 | 376.12 ± 0.11 | 36.46 ± 0.25 | — |
+| 8 192 | 367.23 ± 0.04 | 36.59 ± 0.24 | — |
+| 16 384 | 354.64 | 36.24 | 2 751 MB |
+| 32 768 | 334.09 | 36.20 | 2 716 MB |
+| 65 536 | **300.56** | **36.10** | 2 775 MB |
+
+**Generation falls 1.3% across a 512× context increase.** Prefill falls 16.7%. Doubling context from 32K to 64K costs 59 MB of steady-state RSS.
+
+`-r 1` for the ≥16K runs: each 64K prefill takes ~218 s (65536 ÷ 300.56), so three repetitions would be 11 minutes of wall clock for a number that is already stable to ±0.1.
+
+## 2. Why this is not what the standard formula predicts
+
+The textbook per-token KV cost:
+
+```
+bytes/token = 2 (K and V) × n_layers × n_kv_heads × key_length × 2 (fp16)
+```
+
+For this model — `block_count = 32`, `head_count_kv = 4`, `key_length = 256`:
+
+```
+2 × 32 × 4 × 256 × 2 = 131 072 bytes = 128 KB/token
+```
+
+At 64K tokens that predicts **8 GiB of KV cache**. The machine has 7.31 GiB total. The formula says the run is impossible; the run completed in 6.5 minutes at 36 t/s.
+
+### The missing metadata field
+
+```
+qwen35.attention.full_attention_interval = 4
+```
+
+This is a **hybrid-attention** architecture. Only one layer in four maintains a full KV cache; the rest use a recurrent/linear-attention state whose size does not grow with context. Effective KV cost:
+
+```
+bytes/token ≈ 128 KB / 4 = 32 KB/token
+```
+
+| Context | Naive estimate | Actual |
+|---|---|---|
+| 8 192 | 1.0 GiB | ~260 MB |
+| 32 768 | 4.0 GiB | ~1.0 GiB |
+| 65 536 | 8.0 GiB | ~2.0 GiB |
+
+**Rule: compute KV cost from the count of full-attention layers, never from `block_count`.** On dense-attention models the two are equal, which is why the naive formula usually works — and why it produces a confident 4× overestimate on hybrid architectures like Qwen3.5, Jamba, MiniMax, and Phi-3.5-MoE derivatives.
+
+Read the field before sizing anything:
+
+```bash
+python3 - <<'PY'
+from gguf import GGUFReader
+r = GGUFReader("model.gguf")
+for k in r.fields:
+    if any(s in k.lower() for s in ("attention", "head_count", "block_count", "key_length", "value_length")):
+        print(k, r.fields[k].contents())
+PY
+```
+
+`llama-gguf` on some builds prints nothing; a 40-line metadata reader is more reliable than fighting the tool.
+
+## 3. Prefill vs generation are different problems
+
+| | Scales with | Bound by |
+|---|---|---|
+| **Prefill** | prompt length × n_layers | Compute (matrix-matrix) |
+| **Generation** | 1 token, all weights | Memory bandwidth |
+
+At 64K the prefill rate drops 16.7% (360 → 300 t/s) because attention over 64K tokens becomes a growing share of a matmul-dominated workload. Generation is unaffected because each step still reads the same number of weight bytes — the KV cache it additionally reads (32 KB/token × 65 536 = 2 GB) is spread over 36 tokens/s, i.e. negligible against the weight stream.
+
+**Practical consequence:** time-to-first-token on a long prompt is the number users actually feel. 64K ÷ 300 t/s ≈ 218 s before the first token. No generation-side optimization helps that.
+
+## 4. What actually breaks at 64K
+
+Not the KV cache — the **prefill compute buffer**:
+
+| Phase | RSS |
+|---|---|
+| After load, idle | 2 775 MB |
+| During 64K prefill | **6 914 MB** (83 MB free) |
+| Generating | 2 775 MB |
+
+The transient peak is proportional to prompt length. Lower `n_batch` / `n_ubatch` to shrink it, at the cost of prefill throughput. Always measure the peak, not the steady state, when deciding whether a context length fits.
+
+## 5. Is 128K or 256K possible?
+
+The model declares `context_length = 262144`. That is the training limit, not a hardware limit.
+
+- **128K** — plausible. KV ≈4 GB plus 1.85 GiB weights is too close to 7.31 GiB alongside a prefill buffer that already peaks at 6.9 GB for 64K. Would need reduced `n_ubatch` and probably fails.
+- **256K** — no. KV alone ≈8 GB exceeds managed memory before weights are loaded.
+
+**Do not quote the model's declared `context_length` as achievable.** It is an upper bound from training, and on unified-memory edge devices the binding constraint is usually the prefill buffer, not the KV cache.
