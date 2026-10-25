@@ -1,6 +1,6 @@
 # Context scaling: measured, and why the naive KV formula lies
 
-> **中文速览** —— 这份文档是上下文长度的实测扫描（128 到 65536），解释为什么混合注意力模型上长上下文几乎免费，KV 成本该怎么算（必须按 full-attention 的层数算，不能按 block_count），prefill 和 decode 各自的成本模型，以及 64K 时真正会坏在哪里。
+> **中文速览** —— 这份文档是上下文长度的实测扫描（128 到 262144），解释为什么混合注意力模型上长上下文几乎免费、解码速度为什么不随上下文下降、`-np` 单路设置为什么比 KV 量化更关键，以及 KV 成本该怎么算（必须按 full-attention 的层数算，不能按 block_count）。还记录了真正会坏在哪里：不是 KV，是 prefill 的瞬时计算缓冲。
 
 
 ## 1. The measurement
@@ -21,10 +21,11 @@ systemd-run --user --scope -p MemoryHigh=6.5G -p MemoryMax=7G \
 | 16 384 | 354.64 | 36.24 | 2 751 MB |
 | 32 768 | 334.09 | 36.20 | 2 716 MB |
 | 65 536 | **300.56** | **36.10** | 2 775 MB |
+| 131 072 | **214.24** | 35.97 | 128K prefill, `q4_0` KV |
 
-**Generation falls 1.3% across a 512× context increase.** Prefill falls 16.7%. Doubling context from 32K to 64K costs 59 MB of steady-state RSS.
+**Generation falls 1.3% across a 512× context increase; prefill falls 29% by 128K.** Doubling context from 32K to 64K costs 59 MB of steady-state RSS. Decode is flat because the per-token weight stream dominates; prefill degrades because attention over the prompt becomes a growing share of a matmul-bound workload.
 
-`-r 1` for the ≥16K runs: each 64K prefill takes ~218 s (65536 ÷ 300.56), so three repetitions would be 11 minutes of wall clock for a number that is already stable to ±0.1.
+`-r 1` for the ≥16K runs: each 64K prefill takes ~218 s (65536 ÷ 300.56) and each 128K prefill ~612 s (131072 ÷ 214.24), so repetitions would burn tens of minutes for a number already stable to ±0.1.
 
 ## 2. Why this is not what the standard formula predicts
 
@@ -54,13 +55,17 @@ This is a **hybrid-attention** architecture. Only one layer in four maintains a 
 bytes/token ≈ 128 KB / 4 = 32 KB/token
 ```
 
-> Whether you can shrink this further depends on the **runtime**, not the model: llama.cpp supports `-ctk q8_0` (halves it again), MLC-LLM has no KV quantization at all. See [`kv-quantization.md`](kv-quantization.md) — that single property is why a 9B model reaches 64K here while a 1.7B model cannot reach 32K.
+> Whether you can shrink this further depends on the **runtime**, not the model: llama.cpp supports `-ctk q8_0` / `q4_0` (halves or quarters it again), MLC-LLM has no KV quantization at all. See [`kv-quantization.md`](kv-quantization.md) — that property, plus the slot count, is why a 9B model reaches 256K here while a 1.7B model cannot reach 32K.
 
-| Context | Naive estimate | Actual |
-|---|---|---|
-| 8 192 | 1.0 GiB | ~260 MB |
-| 32 768 | 4.0 GiB | ~1.0 GiB |
-| 65 536 | 8.0 GiB | ~2.0 GiB |
+| Context | Naive estimate | Actual (fp16 KV) | Actual (`q4_0` KV) |
+|---|---|---|---|
+| 8 192 | 1.0 GiB | ~260 MB | ~65 MB |
+| 32 768 | 4.0 GiB | ~1.0 GiB | ~260 MB |
+| 65 536 | 8.0 GiB | ~2.0 GiB | ~520 MB |
+| 131 072 | 16.0 GiB | ~4.0 GiB | **~1.0 GiB** |
+| 262 144 | 32.0 GiB | ~8.0 GiB | **~2.9 GiB** (measured) |
+
+One thing the table hides: `q4_0` does not deliver a clean 4x at large contexts. Measured at 256K the KV allocation was **~2.9 GB**, i.e. ~11.6 KB/token rather than the 8 KB/token the 4x rule predicts — about 3.6x over fp16, not 4x. Budget for the higher figure.
 
 **Rule: compute KV cost from the count of full-attention layers, never from `block_count`.** On dense-attention models the two are equal, which is why the naive formula usually works — and why it produces a confident 4× overestimate on hybrid architectures like Qwen3.5, Jamba, MiniMax, and Phi-3.5-MoE derivatives.
 
@@ -101,11 +106,38 @@ Not the KV cache — the **prefill compute buffer**:
 
 The transient peak is proportional to prompt length. Lower `n_batch` / `n_ubatch` to shrink it, at the cost of prefill throughput. Always measure the peak, not the steady state, when deciding whether a context length fits.
 
-## 5. Is 128K or 256K possible?
+## 5. Is 128K or 256K possible? — measured, yes to both
 
-The model declares `context_length = 262144`. That is the training limit, not a hardware limit.
+The model declares `context_length = 262144`. That is the training limit, and it turns out to also be reachable on an 8 GB board — provided you quantize the KV cache and **run a single slot**.
 
-- **128K** — plausible. KV ≈4 GB plus 1.85 GiB weights is too close to 7.31 GiB alongside a prefill buffer that already peaks at 6.9 GB for 64K. Would need reduced `n_ubatch` and probably fails.
-- **256K** — no. KV alone ≈8 GB exceeds managed memory before weights are loaded.
+All rows below are `llama-server`, `PTQ1_0` weights, single slot (`-np 1`), flash attention on, measured 2026-10-25:
 
-**Do not quote the model's declared `context_length` as achievable.** It is an upper bound from training, and on unified-memory edge devices the binding constraint is usually the prefill buffer, not the KV cache.
+| Context | KV type | Steady RSS | Free RAM after | Decode | Verdict |
+|---|---|---|---|---|---|
+| 65 536 | fp16 | 2 775 MB | ~4.6 GB | 36.10 t/s | comfortable |
+| 131 072 | `q4_0` | 4.46 GB | **1.4 GB** | 35.37 / 36.59 t/s | **recommended** |
+| 131 072 | `q8_0` | 4.76 GB | 360 MB | 35.51 / 36.67 t/s | tight |
+| 262 144 | `q4_0` | 5.70 GB | **39 MB** | 36.08 t/s | works, no headroom |
+
+Three findings that invert what the naive arithmetic predicts:
+
+**Decode speed does not care about context length.** 64K → 256K stays flat at ~36 t/s. The earlier prediction in this document ("128K would drop to about 18 t/s") was wrong. Decode is bound by the weight stream — 1.86 GB read per token — and the 24 non-full-attention layers keep a state that does not grow with context, so a longer KV does not add to that stream. Only *memory* grows.
+
+**`-np` matters more than KV quantization.** `llama-server` defaults to 4 slots, and each slot reserves the full `n_ctx`. At 256K that means four 256K KV allocations:
+
+| Slots | Context | Decode | Outcome |
+|---|---|---|---|
+| `-np 1` | 262 144 | **36.08 t/s** | works |
+| `-np 4` (default) | 262 144 | **16.53 t/s** | first request succeeds, **second request OOM-kills the process** |
+
+The 2.2x speed loss is not the extra memory — it is that a four-slot unified KV pool makes attention slower. Anyone who leaves the default `-np 4` and concludes "long context is slow on Jetson" has measured the wrong variable.
+
+**Concurrency buys nothing on a bandwidth-bound model.** Single-request decode already consumes ~67 GB/s of the ~98 GB/s the board can move. Four slots do not quadruple throughput; they split the same ~36 t/s into four ~9 t/s streams. Parallelism here only helps if your requests are waiting on something other than the GPU — which is why a local 9B is a poor fit for spawning parallel sub-agents: they contend for the same bandwidth, and each runs slower than if they were serialized.
+
+### What still binds: prefill, not decode
+
+The one thing that gets worse is the transient prefill compute buffer, which scales with prompt length. At 64K it already peaks at 6 914 MB of 7 485 MB. A genuine 128K or 256K *fill* is therefore a memory event even when steady-state loading is fine — see §4. Load success is not the same as "I can push 256K tokens through it".
+
+For an agent that actually fills the window, 128K with `q8_0` or `q4_0` is the sane ceiling on this board; 256K is a demo, not a working configuration.
+
+**Do not quote the model's declared `context_length` as achievable without stating the KV type, the slot count, and the headroom left.** All three are load-bearing. The same 262 144 is either "works at 36 t/s" or "OOM-kills your service on request #2" depending entirely on `-np`.

@@ -12,7 +12,7 @@ Idle readings tell you nothing. Sample while tokens are actually being produced.
 ```bash
 # minimal probe: run generation, sample tegrastats concurrently
 tegrastats --interval 500 &
-./llama-cli -m model.gguf -ngl 99 -fa 1 -n 400 -p "..." -st --no-display-prompt &
+./llama-cli -m model.gguf -ngl 99 -fa on -n 400 -p "..." -st --no-display-prompt &
 wait
 ```
 
@@ -41,7 +41,7 @@ Spread is under 3%. On a compute-bound workload these are noise. Run the classif
 
 ## 3. Quantization format beats file size
 
-`llama-cli -ngl 99 -fa 1 --temp 0 -n 150`, same prose prompt, Qwen3 family:
+`llama-cli -ngl 99 -fa on --temp 0 -n 150`, same prose prompt, Qwen3 family:
 
 | Model / quant | Size | Single-stream tok/s |
 |---|---|---|
