@@ -5,6 +5,9 @@ description: Use when tuning LLM inference speed or memory on Jetson Orin, or wh
 
 # Jetson Orin tuning
 
+> **中文速览** —— 这份文档是 Hermes 技能的定义文件，agent 加载这个 skill 时会读它。内容是在 Jetson Orin 上调 LLM 推理的七条结论速查：先判瓶颈、量化格式比体积重要、词表税、长上下文几乎免费、内存账、cgroup 关笼子、KV 量化决定上下文天花板。正文保持英文，术语全是命令和参数名，直接照着执行即可。
+
+
 Measured performance notes for LLM inference on Jetson Orin. The organizing principle: **most tunable parameters are noise, and the ones that matter are structural.** Classify the bottleneck first, then act.
 
 ## When to use

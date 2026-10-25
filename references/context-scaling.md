@@ -1,5 +1,8 @@
 # Context scaling: measured, and why the naive KV formula lies
 
+> **中文速览** —— 这份文档是上下文长度的实测扫描（128 到 65536），解释为什么混合注意力模型上长上下文几乎免费，KV 成本该怎么算（必须按 full-attention 的层数算，不能按 block_count），prefill 和 decode 各自的成本模型，以及 64K 时真正会坏在哪里。
+
+
 ## 1. The measurement
 
 Ternary-Bonsai-2 9B (`PTQ1_0`, 1.85 GiB, 8.95B params, 1.75 bpw) on a 7.3 GiB Orin Nano, `llama-bench`:

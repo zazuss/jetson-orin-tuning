@@ -1,5 +1,8 @@
 # Memory budget on an "8 GB" Orin, and how to not get OOM-killed
 
+> **中文速览** —— 这份文档算内存账：标称 8 GB 实际只剩 7.31 GiB 可用，单次 cudaMalloc 能拿多少、分块累积能拿多少、CMA 那 256 MB 为什么跟你无关、cgroup 怎么关笼子、OOM 之前有哪些前兆、桌面环境吃掉多少。判断某个模型能不能装下之前先看这个。
+
+
 ## 1. Nominal is not available
 
 | Figure | Value | Source |

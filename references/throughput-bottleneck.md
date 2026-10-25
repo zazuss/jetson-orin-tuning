@@ -1,5 +1,8 @@
 # Single-stream decode: classify the bottleneck first
 
+> **中文速览** —— 这份文档讲怎么判断你卡在算力还是带宽上（tegrastats 看 GR3D 和 EMC 的占用组合），以及一堆大家爱调但其实没用的参数（线程数、batch、GPU 频率、投机解码深度）。还有量化格式怎么选（Q4_0 为什么比体积更小的 Q3_K_S 快）、词表税怎么算、单流和聚合吞吐的口径差别。
+
+
 When asking "is this as fast as it should be?" or "something must be misconfigured" — **prove which class of bottleneck you're in before changing anything.** On an Orin Nano Super 8GB, a 2B Q4 model at 32–35 tok/s single-stream is correct, and there is published reference data to confirm it.
 
 ## 1. Classify: sample tegrastats during generation

@@ -1,5 +1,8 @@
 # Unlocking EMC 2133 → 3199 MHz, and measuring bandwidth honestly
 
+> **中文速览** —— 这份文档讲怎么把内存频率从 2133 解锁到 3199 MHz，为什么 apt upgrade 做不到这件事（不刷 QSPI 的 BCT），怎么用三条独立读数确认真的生效了，以及测带宽的正确姿势和那个会污染结果的时间测量 bug。
+
+
 ## 1. The problem
 
 A Jetson Orin Nano **non-Super** BCT hard-locks EMC at 2133 MHz (measured ceiling **68.3 GB/s**). Flashing the BCT from `jetson-orin-nano-devkit-super.conf` (JetPack 7 / L4T R39.2.1) raises the ceiling to 3199 MHz (**102.4 GB/s**).

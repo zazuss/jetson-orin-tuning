@@ -1,5 +1,8 @@
 # KV cache quantization — why it decides your context ceiling
 
+> **中文速览** —— 这份文档讲 KV 量化为什么决定你的上下文天花板：哪些推理引擎支持、llama.cpp 具体怎么传参（-ctk q8_0 -ctv q8_0 -fa 1，其中 -fa 1 是必须的）、MLC-LLM 没有这个能力的三条证据、改不动引擎时用 sliding_window_size 兜底，以及 NvMap/CMA 那个经典误诊。
+
+
 Worth knowing before you pick an engine: **KV-cache quantization is an architectural property of the runtime, not an optional flag you can assume exists.** Two engines on the same board, same model, same weights can differ by 8x in feasible context purely because one of them can store K/V in 8 bits and the other can't.
 
 ## The arithmetic that actually matters
